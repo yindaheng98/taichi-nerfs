@@ -13,6 +13,7 @@ from .triplane import TriPlaneEncoder
 from .utils import morton3D, morton3D_invert, packbits
 from .volume_train import VolumeRenderer
 from .sh_utils import eval_sh
+from .interpolate3d import interpolate
 
 
 class TruncExp(torch.autograd.Function):
@@ -522,17 +523,6 @@ class VoxelGrid(NGP):
     def normalize_samples(self, pts):
         return (pts- self.grid_normalized_coords.min(0)[0]) / self.grid_radius
 
-    def trilinear_interpolation(self, bundles, weight_a, weight_b):
-        c00 = bundles[0] * weight_a[:, 2:] + bundles[1] * weight_b[:, 2:]
-        c01 = bundles[2] * weight_a[:, 2:] + bundles[3] * weight_b[:, 2:]
-        c10 = bundles[4] * weight_a[:, 2:] + bundles[5] * weight_b[:, 2:]
-        c11 = bundles[6] * weight_a[:, 2:] + bundles[7] * weight_b[:, 2:]
-        c0 = c00 * weight_a[:, 1:2] + c01 * weight_b[:, 1:2]
-        c1 = c10 * weight_a[:, 1:2] + c11 * weight_b[:, 1:2]
-        results = c0 * weight_a[:, :1] + c1 * weight_b[:, :1]
-
-        return results
-
     def query_grids(self, idx, use_trilinear=False):
         """
         Query the grid fields at the given indices.
@@ -549,22 +539,19 @@ class VoxelGrid(NGP):
         idx_mask = self.out_of_grid(aligned_idx)
         x_idx, y_idx, z_idx = self.fix_out_of_grid(aligned_idx)
 
-        query_sh = self.sh_fields[x_idx, y_idx, z_idx] * idx_mask.unsqueeze(-1)  # zero the samples that are out of the grid
-        query_density = self.density_fields[x_idx, y_idx, z_idx] * idx_mask.unsqueeze(-1)  # zero the samples that are out of the grid
-
         if use_trilinear:
-            weight_b = torch.abs(idx - aligned_idx)
-            weight_a = 1.0 - weight_b
-            samples_density = self.trilinear_interpolation(query_density, weight_a, weight_b) # TODO: trilinear_interpolation seems wrong
-            samples_sh = self.trilinear_interpolation(query_sh, weight_a, weight_b)
+            samples_sh = interpolate(self.sh_fields.unsqueeze(0), idx.unsqueeze(0)).squeeze(0)
+            samples_density = interpolate(self.density_fields.unsqueeze(0), idx.unsqueeze(0)).squeeze(0)
             return samples_sh, samples_density
 
+        query_sh = self.sh_fields[x_idx, y_idx, z_idx] * idx_mask.unsqueeze(-1)  # zero the samples that are out of the grid
+        query_density = self.density_fields[x_idx, y_idx, z_idx] * idx_mask.unsqueeze(-1)  # zero the samples that are out of the grid
         return query_sh, query_density
 
 
     def forward(self, pts, dirs):
         normalized_idx = self.normalize_samples(pts)
-        samples_sh, samples_density = self.query_grids(normalized_idx, use_trilinear=False)
+        samples_sh, samples_density = self.query_grids(normalized_idx, use_trilinear=True)
         samples_rgb = torch.empty((pts.shape[0], 3), device=samples_sh.device)
         sh_dim = self.sh_dim
         for i in range(3):
